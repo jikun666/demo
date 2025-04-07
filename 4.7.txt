@@ -1,0 +1,119 @@
+// Boost.MSM 状态机实现
+#include <iostream>
+#include <boost/msm/back/state_machine.hpp>    // 状态机后端实现
+#include <boost/msm/front/state_machine_def.hpp> // 状态机前端定义
+#include <boost/msm/front/functor_row.hpp>      // 转移规则支持
+using namespace std; 
+
+namespace msm = boost::msm;   // 命名空间别名简化
+namespace mpl = boost::mpl;   // 元编程库别名
+
+/* 事件定义（对应图片中的事件触发）
+ * 空结构体作为事件标记，触发状态转移 */
+struct CallDialed {};          // 拨号事件
+struct CallConnected {};       // 接通成功事件
+struct PlacedOnHold {};        // 保持通话事件
+struct PhoneThrownIntoWall {};  // 摔手机事件（对应图片中的销毁条件）
+
+/* 状态定义（继承msm::front::state<>）
+ * 每个状态可定义进入/退出行为 */
+struct OffHook : msm::front::state<> {}; // 挂机状态（初始状态）
+
+struct Connecting : msm::front::state<> {
+    template<class Event, class FSM>
+    void on_entry(const Event&, FSM&) {  // 进入状态时执行（图片中的"we are connecting"）
+        cout << "正在建立连接..." << endl;
+    }
+    // 可添加on_exit定义退出行为（对应图片中的注释"// also on exit"）
+};
+
+struct Connected : msm::front::state<> {};   // 已接通状态
+struct OnHold : msm::front::state<> {};      // 保持状态
+struct PhoneDestoryed : msm::front::state<> {}; // 已损坏状态（终止状态）
+
+/* 状态机主体定义（对应图片中的PhoneStateMachine）
+ * 继承state_machine_def实现状态机规范 */
+struct PhoneStateMachine : msm::front::state_machine_def<PhoneStateMachine> {
+    bool angry{false}; // 状态机共享变量（对应图片中的angry标志）
+
+    /* 状态转移动作（图片中的PhoneBeingDestroyed）
+     * 当手机被摔时执行的具体行为 */
+    struct PhoneBeingDestoryed {
+        template<class EVT, class FSM, class SourceState, class TargetState>
+        void operator()(EVT const&, FSM&, SourceState&, TargetState&) {
+            cout << "手机摔成碎片！" << endl; // 实际销毁动作
+        }
+    };
+
+    /* 守卫条件（对应图片中的CanDestroyPhone）
+     * 控制状态转移是否允许执行 */
+    struct CanDestoryPhone {
+        template<class EVT, class FSM, class SourceState, class TargetState>
+        bool operator()(EVT const&, FSM& fsm, SourceState&, TargetState&) {
+            return fsm.angry; // 仅当angry为true时允许转移（图片中的条件判断）
+        }
+    };
+
+    /* 状态转移表（核心配置，对应图片中的transition_table）
+     * 使用MPL容器定义转移规则 */
+    struct transition_table : mpl::vector<
+        // 格式：源状态 | 事件 | 目标状态 | 动作 | 守卫条件
+        msm::front::Row<OffHook,   CallDialed,          Connecting>,  // 规则1：拨号
+        msm::front::Row<Connecting, CallConnected,      Connected>,   // 规则2：接通
+        msm::front::Row<Connected, PlacedOnHold,       OnHold>,      // 规则3：保持
+        
+        // 规则4：摔手机（包含动作和守卫条件）
+        msm::front::Row<OnHold,    PhoneThrownIntoWall, PhoneDestoryed,
+                        PhoneBeingDestoryed,  // 执行销毁动作
+                        CanDestoryPhone>      // 检查愤怒条件
+    > {};
+
+    // 设置初始状态（图片中的initial_state）
+    typedef OffHook initial_state;
+
+    /* 无效转移处理（图片中未展示但重要的容错机制）
+     * 当没有匹配的转移规则时触发 */
+    template <class FSM, class Event>
+    void no_transition(Event const& e, FSM&, int state) {
+        static const char* const state_names[] = {
+            "待机", "连接中", "已接通", "保持中", "已损坏" // 状态名称映射
+        };
+        cout << "无效操作：无法从状态 [" << state_names[state] 
+             << "] 执行事件 [" << typeid(e).name() << "]" << endl;
+    }
+};
+
+// 状态机实例化封装
+using PhoneFSM = msm::back::state_machine<PhoneStateMachine>;
+
+/* 状态显示辅助函数（增强可读性）
+ * 输出当前状态的人类可读名称 */
+void info(const PhoneFSM& phone) {
+    static const char* const states[] = {
+        "待机", "连接中", "已接通", "保持中", "已损坏"
+    };
+    cout << "当前状态: [" << states[phone.current_state()[0]] << "]" <<endl;
+}
+
+int main() {
+    PhoneFSM phone;    // 实例化状态机
+    phone.start();     // 初始化到OffHook状态
+
+    /* 测试流程（对应图片中的示例操作） */
+    info(phone); // 初始状态
+    phone.process_event(CallDialed{});    // 转移：OffHook -> Connecting
+    info(phone);
+    phone.process_event(CallConnected{});  // 转移：Connecting -> Connected
+    info(phone);
+    phone.process_event(PlacedOnHold{});  // 转移：Connected -> OnHold
+    info(phone);
+
+    phone.angry = true; // 设置愤怒标志（满足守卫条件）
+    phone.process_event(PhoneThrownIntoWall{}); // 转移：OnHold -> PhoneDestoryed
+    info(phone);
+
+    // 测试无效操作（触发no_transition）
+    phone.process_event(CallDialed{});    // 已损坏状态下不允许拨号
+
+    return 0;
+}
